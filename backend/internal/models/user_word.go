@@ -13,7 +13,9 @@ type UserWord struct {
 	RepeatsStandard      int     `gorm:"default:0"`
 	RepeatsTranslation   int     `gorm:"default:0"`
 	RepeatsShuffle       int     `gorm:"default:0"`
+	RepeatsAsr           int     `gorm:"default:0"`
 	CompletedStandard    bool
 	CompletedTranslation bool
 	CompletedShuffle     bool
+	CompletedAsr         bool
 }

@@ -26,6 +26,49 @@ type WordEntry struct {
 
 var baseWords map[uint]string
 
+func levenshteinSimilarity(a, b string) float64 {
+	la := len(a)
+	lb := len(b)
+	if la == 0 || lb == 0 {
+		return 0
+	}
+	d := make([][]int, la+1)
+	for i := range d {
+		d[i] = make([]int, lb+1)
+	}
+	for i := 0; i <= la; i++ {
+		d[i][0] = i
+	}
+	for j := 0; j <= lb; j++ {
+		d[0][j] = j
+	}
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			d[i][j] = min(
+				d[i-1][j]+1,
+				min(d[i][j-1]+1, d[i-1][j-1]+cost),
+			)
+		}
+	}
+	dist := d[la][lb]
+	maxLen := la
+	if lb > la {
+		maxLen = lb
+	}
+	return 1.0 - float64(dist)/float64(maxLen)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func LoadBaseWords() {
 	baseWords = make(map[uint]string)
 	data, err := ioutil.ReadFile("data/words.json")
@@ -260,7 +303,6 @@ func GetNextTask(c *gin.Context) {
 }
 
 func SubmitAsrResult(c *gin.Context) {
-	fmt.Println("🛬 Получен запрос на /api/asr-submit")
 	file, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no file provided"})
@@ -290,8 +332,8 @@ func SubmitAsrResult(c *gin.Context) {
 	fileContent, _ := os.Open(tempFile.Name())
 	io.Copy(part, fileContent)
 	writer.Close()
-	fmt.Println("📦 Имя файла:", file.Filename)
-	fmt.Println("📦 Размер:", file.Size)
+	fmt.Println("Имя файла:", file.Filename)
+	fmt.Println("Размер:", file.Size)
 
 	resp, err := http.Post("http://127.0.0.1:8001/transcribe", writer.FormDataContentType(), body)
 	if err != nil {
@@ -305,13 +347,15 @@ func SubmitAsrResult(c *gin.Context) {
 	predicted := strings.ToLower(strings.TrimSpace(result["text"]))
 	expected = strings.ToLower(strings.TrimSpace(expected))
 
-	isCorrect := strings.Contains(predicted, expected)
+	similarity := levenshteinSimilarity(predicted, expected)
+	isCorrect := similarity >= 0.75
+
 	c.JSON(http.StatusOK, gin.H{"correct": isCorrect, "transcribed": predicted})
 
-	fmt.Println("📤 Отправка файла на модель:", file.Filename)
-	fmt.Println("🔠 Ожидаемый текст:", expected)
-	fmt.Println("📩 Ответ от модели:", predicted)
-	fmt.Println("✅ Совпадает ли:", isCorrect)
+	fmt.Println("Отправка файла на модель:", file.Filename)
+	fmt.Println("Ожидаемый текст:", expected)
+	fmt.Println("Ответ от модели:", predicted)
+	fmt.Println("Совпадает ли:", isCorrect)
 }
 
 func SubmitResult(c *gin.Context) {
@@ -360,6 +404,8 @@ func SubmitResult(c *gin.Context) {
 			uw.RepeatsTranslation++
 		case "sentence_shuffle":
 			uw.RepeatsShuffle++
+		case "asr_reading":
+			uw.RepeatsAsr++
 		}
 
 		if !strings.Contains(uw.TaskTypesPassed, input.TaskType) {
@@ -378,6 +424,9 @@ func SubmitResult(c *gin.Context) {
 		}
 		if uw.RepeatsShuffle >= 3 && uw.Mistakes <= 1 {
 			uw.CompletedShuffle = true
+		}
+		if uw.RepeatsAsr >= 3 && uw.Mistakes <= 1 {
+			uw.CompletedAsr = true
 		}
 
 	} else {
@@ -406,6 +455,8 @@ func SubmitResult(c *gin.Context) {
 				uw.CompletedTranslation = false
 			case "sentence_shuffle":
 				uw.CompletedShuffle = false
+			case "asr_reading":
+				uw.CompletedAsr = false
 			}
 		}
 
@@ -417,6 +468,7 @@ func SubmitResult(c *gin.Context) {
 		if uw.RepeatsStandard >= 3 &&
 			uw.RepeatsTranslation >= 3 &&
 			uw.RepeatsShuffle >= 3 &&
+			uw.RepeatsAsr >= 3 &&
 			uw.Mistakes <= 1 &&
 			uw.Coefficient >= 1 {
 			uw.Status = "learned"
@@ -456,6 +508,7 @@ func SubmitResult(c *gin.Context) {
 			"standard":         1.5,
 			"word_translation": 1,
 			"sentence_shuffle": 2,
+			"asr_reading":      0.5,
 		}
 		levelXpReward := int(float64(xpMap[input.TaskType]) * 1.2)
 
@@ -463,6 +516,7 @@ func SubmitResult(c *gin.Context) {
 			"standard":         1.5,
 			"word_translation": 1,
 			"sentence_shuffle": 2,
+			"asr_reading":      0.5,
 		}
 		treeXpReward := int(treeXpRewardMap[input.TaskType])
 

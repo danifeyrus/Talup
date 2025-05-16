@@ -1,4 +1,6 @@
-import React, { useEffect, useState, useRef, useMemo } from "react";
+import { Audio } from 'expo-av';
+import * as FileSystem from "expo-file-system";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   Image,
@@ -10,10 +12,8 @@ import {
 } from "react-native";
 import { COLORS } from "../constants/colors";
 import { scaleFont, scaleSize } from "../constants/dimensions";
-import Button from "./Button";
-import { Audio } from 'expo-av';
 import { apiUpload } from '../utils/wav';
-import * as FileSystem from "expo-file-system";
+import Button from "./Button";
 
 interface Task {
   word_id: number;
@@ -58,15 +58,21 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
 
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const [recordedURI, setRecordedURI] = useState<string | null>(null);
-  const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<'correct' | 'incorrect' | null>(null);
-
+  const [canCheck, setCanCheck] = useState(false);
+  const [isLockedAfterCheck, setIsLockedAfterCheck] = useState(false);
 
   const startRecording = async () => {
+    if (isLockedAfterCheck) return;
     setAnswered(false);
     setCheckResult(null);
 
     try {
+      setRecordedURI(null);
+      setCheckResult(null);
+      setCanCheck(false);
+      setAnswered(false);
+
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) return;
 
@@ -91,13 +97,14 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
 
       const isActuallyRecording = await recording.getStatusAsync();
       if (!isActuallyRecording.isRecording) {
-        console.warn("Recorder не активен — остановка пропущена");
+        console.warn("[MIC] Попытка остановить неактивную запись");
         return;
       }
 
       await recording.stopAndUnloadAsync();
       const uri = recording.getURI();
       setRecordedURI(uri);
+      setCanCheck(true);
       setRecording(null);
       console.log("Аудио сохранено в:", uri);
     } catch (err) {
@@ -105,23 +112,17 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
     }
   };
 
-  const deleteRecording = () => {
-    setCheckResult(null);
-  };
-
   const checkRecording = async () => {
+    if (isLockedAfterCheck) return;
     if (!recordedURI) {
-      console.log("❌ Нет recordedURI!");
       return;
     }
 
-    console.log("📤 Отправка файла:", recordedURI);
-    console.log("🧾 Ожидаемый текст:", task.text);
-
+    console.log(`[ASR] Отправка аудио: ${recordedURI}`);
+    console.log(`[ASR] Текст для проверки: "${task.text?.slice(0, 50)}"`);
     try {
       const fileInfo = await FileSystem.getInfoAsync(recordedURI);
       if (!fileInfo.exists) {
-        console.log("❌ Файл не найден по пути:", recordedURI);
         return;
       }
 
@@ -134,13 +135,14 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
       formData.append("expected", task.text?.toLowerCase()?.trim() ?? "");
 
       const { response, data } = await apiUpload("/api/asr-submit", formData);
-      console.log("📬 Ответ от сервера:", response?.status, data);
-
+      console.log(`[ASR] Server response: ${response?.status} | Correct: ${data?.correct}`);
       const isCorrect = data?.correct;
       setCheckResult(isCorrect ? "correct" : "incorrect");
       setAnswered(true);
+      setCanCheck(false);
+      setIsLockedAfterCheck(true);
     } catch (error) {
-      console.error("💥 Ошибка при отправке аудио:", error);
+      console.error("[ASR] Ошибка при отправке аудио:", error);
     }
   };
 
@@ -155,12 +157,34 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
     return normalize(userAnswer) === normalize(task.correctAnswer || "");
   }, [constructed, selected, task]);
 
+  const renderSentence = (sentence: string) => {
+    const parts = sentence.split("___");
+
+    return (
+      <Text style={styles.cardSentence}>
+        {parts.map((part, index) => (
+          <React.Fragment key={index}>
+            <Text>{part}</Text>
+            {index !== parts.length - 1 && (
+              <Text style={styles.maskedWord}>...</Text>
+            )}
+          </React.Fragment>
+        ))}
+      </Text>
+    );
+  };
+
+
   useEffect(() => {
     setSelected(null);
     setAnswered(false);
     setConstructed([]);
     setCheckResult(null);
     setPersonImage(peopleImages[Math.floor(Math.random() * peopleImages.length)]);
+    setRecordedURI(null);
+    setIsLockedAfterCheck(false);
+    setCanCheck(false);
+    setRecording(null);
     opacity.setValue(0);
     Animated.timing(opacity, {
       toValue: 1,
@@ -186,19 +210,20 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
   };
 
   const handleContinue = async () => {
-    console.log("👉 Нажата кнопка 'Продолжить'");
 
     if (task.type === 'asr_reading') {
-      if (!checkResult) {
-        await checkRecording(); // только если ещё не проверено
-      } else {
-        onAnswer(checkResult === 'correct');
-      }
-    } else {
+      if (!checkResult) return;
+      onAnswer(checkResult === 'correct');
+      setAnswered(false);
+      setCheckResult(null);
+      return;
+    }
+    else {
       if (!answered) {
         setAnswered(true);
       } else {
         onAnswer(isCorrect);
+        setAnswered(false);
       }
     }
   };
@@ -220,26 +245,31 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
         />
 
         {task.type === "asr_reading" ? (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Прочитайте вслух:</Text>
+          <View style={[
+            styles.card,
+            checkResult === "correct" && styles.correct,
+            checkResult === "incorrect" && styles.incorrect
+          ]}>
+            <Text style={[
+              styles.cardTitle,
+              checkResult === 'incorrect' && styles.incorrectText
+            ]}>
+              Прочитайте вслух:
+            </Text>
             <Text style={styles.cardSentence}>{task.text}</Text>
 
-            <View style={styles.micButtonWrapper}>
-              <TouchableOpacity
-                onPress={recording ? stopRecording : startRecording}
-                style={[styles.micButton, recording && styles.micButtonActive]}
-              >
-                <Image source={recording ? stopIcon : micIcon} style={styles.micIcon} />
-              </TouchableOpacity>
-            </View>
-
             {recordedURI && !recording && (
-              <Text style={styles.micHint}>Нажмите "Продолжить" для проверки</Text>
+              <Text style={styles.micHint}>Нажмите "Проверить", чтобы получить результат</Text>
             )}
 
             {checkResult && (
-              <Text style={{ textAlign: 'center', color: checkResult === 'correct' ? 'green' : 'red' }}>
-                {checkResult === 'correct' ? 'Правильно!' : 'Неправильно. Попробуйте ещё раз.'}
+              <Text style={{
+                textAlign: 'center',
+                color: checkResult === 'correct' ? 'green' : 'red',
+                fontWeight: '600',
+                marginTop: scaleSize(10),
+              }}>
+                {checkResult === 'correct' ? 'Правильно!' : 'Неправильно.'}
               </Text>
             )}
           </View>
@@ -248,13 +278,18 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
             <View
               style={[
                 styles.card,
-                answered && task.type === "sentence_shuffle" && isCorrect && styles.correct,
-                answered && task.type === "sentence_shuffle" && !isCorrect && styles.incorrect
+                answered && isCorrect && styles.correct,
+                answered && !isCorrect && styles.incorrect
               ]}
             >
               {task.type === "word_translation" ? (
                 <>
-                  <Text style={styles.cardTitle}>Переведите слово:</Text>
+                  <Text style={[
+                    styles.cardTitle,
+                    answered && !isCorrect && styles.incorrectText
+                  ]}>
+                    Переведите слово:
+                  </Text>
                   <Text style={styles.bigWord}>
                     {task.translationTarget || task["translation_target"] || ""}
                   </Text>
@@ -263,7 +298,7 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
                 <Text
                   style={[
                     styles.cardTitle,
-                    answered && task.type === "sentence_shuffle" && !isCorrect && styles.incorrectText
+                    answered && !isCorrect && styles.incorrectText
                   ]}
                 >
                   {task.type === "sentence_shuffle"
@@ -280,7 +315,9 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
 
               {task.type !== "word_translation" && (
                 <Text style={styles.cardSentence}>
-                  {task.type === "sentence_shuffle" ? task.translation : task.sentence}
+                  {task.type === "sentence_shuffle"
+                    ? task.translation
+                    : renderSentence(task.sentence)}
                 </Text>
               )}
 
@@ -299,33 +336,50 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
               )}
             </View>
 
-            <View style={styles.optionsWrapper}>
-              {filteredOptions.map((option, idx) => {
-                const isSelected = task.type === "sentence_shuffle"
-                  ? constructed.includes(option)
-                  : selected?.trim().toLowerCase() === option.trim().toLowerCase();
-                const isThisCorrect =
-                  task.correctAnswer?.trim().toLowerCase() === option.trim().toLowerCase();
+            {task.type === "sentence_shuffle" ? (
+              <View style={styles.sentenceWrapper}>
+                {filteredOptions
+                  .filter((opt) => !constructed.includes(opt))
+                  .map((option, idx) => (
+                    <TouchableOpacity
+                      key={idx}
+                      onPress={() => handleSelect(option)}
+                      disabled={answered}
+                      style={[
+                        styles.chip,
+                        answered && !isCorrect && styles.chipIncorrect,
+                      ]}
+                    >
+                      <Text style={styles.chipText}>{option.toLowerCase()}</Text>
+                    </TouchableOpacity>
+                  ))}
+              </View>
+            ) : (
+              <View style={styles.optionsWrapper}>
+                {filteredOptions.map((option, idx) => {
+                  const isSelected =
+                    selected?.trim().toLowerCase() === option.trim().toLowerCase();
+                  const isThisCorrect =
+                    task.correctAnswer?.trim().toLowerCase() === option.trim().toLowerCase();
 
-                return (
-                  <TouchableOpacity
-                    key={idx}
-                    style={[
-                      styles.option,
-                      !answered && isSelected && styles.optionSelected,
-                      answered && isSelected &&
-                      task.type !== "sentence_shuffle" &&
-                      (isThisCorrect ? styles.correct : styles.incorrect),
-                    ]}
-                    onPress={() => handleSelect(option)}
-                    activeOpacity={0.85}
-                    disabled={answered}
-                  >
-                    <Text style={styles.optionText}>{option}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+                  return (
+                    <TouchableOpacity
+                      key={idx}
+                      style={[
+                        styles.option,
+                        !answered && isSelected && styles.optionSelected,
+                        answered && isSelected && (isThisCorrect ? styles.correct : styles.incorrect),
+                      ]}
+                      onPress={() => handleSelect(option)}
+                      activeOpacity={0.85}
+                      disabled={answered}
+                    >
+                      <Text style={styles.optionText}>{option.toLowerCase()}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
             {answered && (
               <View style={styles.answerCard}>
@@ -339,19 +393,50 @@ const TaskRenderer: React.FC<Props> = ({ task, onAnswer, currentIndex, total }) 
         )}
       </ScrollView>
 
+      {task.type === "asr_reading" && (
+        <View style={styles.micButtonWrapper}>
+          <TouchableOpacity
+            onPress={recording ? stopRecording : startRecording}
+            disabled={isLockedAfterCheck}
+            style={[
+              styles.micButton,
+              recording && styles.micButtonActive,
+              isLockedAfterCheck && styles.micButtonDisabled
+            ]}
+          >
+            <Image source={recording ? stopIcon : micIcon} style={styles.micIcon} />
+          </TouchableOpacity>
+        </View>
+      )}
+
       <View style={styles.buttonWrapper}>
-        <Button
-          title={"Продолжить"}
-          type={
-            !answered && (
-              (task.type === "sentence_shuffle" && constructed.length < task.options.length) ||
-              (task.type !== "sentence_shuffle" && selected === null && task.type !== "asr_reading")
-            )
-              ? "disabled"
-              : "primary"
-          }
-          onPress={handleContinue}
-        />
+        {task.type === "asr_reading" && checkResult === null ? (
+          <Button
+            title="Проверить"
+            type={!canCheck ? "disabled" : "primary"}
+            onPress={checkRecording}
+          />
+        ) : task.type === "asr_reading" ? (
+          <Button
+            title="Продолжить"
+            type="primary"
+            onPress={handleContinue}
+          />
+        ) : (
+          <Button
+            title="Продолжить"
+            type={
+              !answered && (
+                (task.type === "sentence_shuffle" && constructed.length < task.options.length) ||
+                (task.type !== "sentence_shuffle" && selected === null)
+              )
+                ? "disabled"
+                : "primary"
+            }
+            onPress={handleContinue}
+          />
+        )}
+
       </View>
     </Animated.View>
   );
@@ -525,7 +610,7 @@ const styles = StyleSheet.create({
   },
   micButtonWrapper: {
     alignItems: 'center',
-    marginTop: scaleSize(20),
+    marginVertical: scaleSize(20),
   },
   micButton: {
     width: scaleSize(64),
@@ -534,11 +619,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 6,
-    elevation: 5,
   },
   micButtonActive: {
     backgroundColor: '#D46A6A',
@@ -553,8 +633,18 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     marginTop: scaleSize(10),
     fontSize: scaleFont(14),
+  },
+  micButtonDisabled: {
+    backgroundColor: COLORS.textSecondary
+  },
+  micIconDisabled: {
+    tintColor: COLORS.textSecondary,
+  },
+  maskedWord: {
+    fontStyle: 'italic',
+    fontWeight: 'bold',
+    color: COLORS.primary,
   }
-
 });
 
 export default TaskRenderer;
