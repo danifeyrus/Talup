@@ -17,7 +17,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     print("📥 Получен файл:", file.filename)
 
     if not file.filename.endswith((".wav", ".m4a")):
-        print("❌ Неподдерживаемый формат:", file.filename)
+        print("Неподдерживаемый формат:", file.filename)
         return JSONResponse(status_code=400, content={"error": "Поддерживаются только .wav и .m4a файлы."})
 
     temp_dir = tempfile.mkdtemp()
@@ -27,7 +27,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
         content = await file.read()
         f.write(content)
 
-    print("📁 Сохранено во временный файл:", input_path)
+    print("Сохранено во временный файл:", input_path)
 
     try:
         output_path = os.path.join(temp_dir, "converted.wav")
@@ -36,13 +36,13 @@ async def transcribe_audio(file: UploadFile = File(...)):
         audio.export(output_path, format="wav")
         print("🔁 Конвертация прошла успешно:", output_path)
     except Exception as e:
-        print("❌ Ошибка конвертации:", e)
+        print("Ошибка конвертации:", e)
         return JSONResponse(status_code=500, content={"error": "Ошибка обработки аудио."})
 
     try:
         result = asr_pipeline(output_path)
-        print("✅ Распознано:", result["text"])
+        print("Распознано:", result["text"])
         return {"text": result["text"]}
     except Exception as e:
-        print("❌ Ошибка распознавания:", e)
+        print("Ошибка распознавания:", e)
         return JSONResponse(status_code=500, content={"error": "Ошибка при распознавании речи."})
